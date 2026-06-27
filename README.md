@@ -79,3 +79,40 @@ Publish the Rota: Before the operational week starts, log scheduled shift assign
 POS Order Taking: Leave the application loaded on a countertop tablet or terminal. Staff clock in/out directly on screen, and your tills process itemized customer orders, discounts, voids, or complaint metrics seamlessly.
 
 Close the Books: Settle payroll transactions through the Payroll Auditor tab, and monitor your total tax liabilities, waste margins, and net performance directly inside Performance Analytics with immediate CSV print capabilities.
+
+
+
+
+## 🍏 Native macOS Desktop Bundle Deployment
+
+The repository includes compilation configuration pipelines to package the interactive Streamlit EPOS platform into a native standalone macOS desktop application (`.app` bundle). This compiles all underlying Python runtimes, C-libraries, and framework components into a single executable layer.
+
+### 🛠️ Production Compilation Pipeline
+
+1. **Install Local Dependencies**
+   Ensure your local macOS host environment contains the base application framework dependencies and `pyinstaller` system modules:
+   ```bash
+   python3 -m pip install streamlit pandas pyinstaller --break-system-packages
+
+
+Generate the Isolated Application Spec Bundle
+Execute the pyinstaller compiler from the root project directory. The pipeline explicitly passes the --collect-all flag to force the compiler to recursively sweep and collect all dynamic web assets, Javascript dependencies, and frontend CSS styles bundled with Streamlit:
+
+Bash
+pyinstaller --name="RestaurantHub" --onedir --windowed --collect-all streamlit mac_run.py
+
+Inject Operational Architecture Assets
+Modern versions of PyInstaller isolate standard library references and execution scripts inside a protected subdirectory named _internal/ to preserve top-level folder health.
+
+To allow the executable binary to resolve core system schemas at runtime, manually copy the application layout script and database directory directly into the internal dependency tree:
+
+Source Files: app.py and the data/ directory (holding your restaurant_tracker.db file).
+
+Target Compilation Directory: dist/RestaurantHub/_internal/
+
+### 🎯 Booting the Application
+Once your assets are injected into the internal tree, navigate back to the primary distribution directory (dist/RestaurantHub/) and launch the platform:
+
+Bash
+./dist/RestaurantHub/RestaurantHub
+Desktop Application Execution: Alternatively, you can double-click the RestaurantHub executable binary file directly inside your macOS Finder layout. The background engine will instantly wake up, mount your local SQLite state, and automatically forward your desktop session to a live dashboard pipeline inside a standalone web container instance.
