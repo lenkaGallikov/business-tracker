@@ -4,16 +4,33 @@ import sqlite3
 from datetime import datetime, timedelta
 import calendar
 import os
+import hashlib
 
-# --- CONFIGURATION ---
-ADMIN_PASSWORD = "admin"
 DB_PATH = "data/restaurant_tracker.db"
 os.makedirs("data", exist_ok=True)
+
+# --- CRYPTOGRAPHY ENGINE ---
+def hash_password(password, salt=None):
+    """Generates a secure SHA-256 hash using a random salt."""
+    if salt is None:
+        salt = os.urandom(16).hex()  # Generate a secure unique random salt
+    enc = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt.encode('utf-8'), 100000)
+    return enc.hex(), salt
+
+def verify_password(stored_hash, stored_salt, provided_password):
+    """Verifies if the entered password matches the stored database hash."""
+    check_hash, _ = hash_password(provided_password, stored_salt)
+    return check_hash == stored_hash
+
 
 # --- DATABASE SETUP ---
 def init_db():
     with sqlite3.connect(DB_PATH) as conn:
         c = conn.cursor()
+        # Security Table
+        c.execute('''CREATE TABLE IF NOT EXISTS credentials 
+                     (id INTEGER PRIMARY KEY AUTOINCREMENT, password_hash TEXT, password_salt TEXT)''')
+        # Operational Tables
         c.execute('''CREATE TABLE IF NOT EXISTS financials 
                      (id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT, type TEXT, category TEXT, 
                       item_name TEXT, quantity INTEGER, base_amount REAL, tax_amount REAL, net_amount REAL, 
@@ -49,15 +66,48 @@ def execute_db(query, params=()):
 st.set_page_config(page_title="EPOS Restaurant Hub", layout="wide")
 st.title("🍳 Restaurant EPOS Engine, Rota Planner & Analytics")
 
+# --- INITIALIZATION AUTH CHECK ---
 if "admin_authenticated" not in st.session_state:
     st.session_state["admin_authenticated"] = False
+
+# Query credentials system status
+cred_df = run_query("SELECT password_hash, password_salt FROM credentials LIMIT 1")
+IS_SETUP = not cred_df.empty
+
+# If this is the absolute first launch, hijack the interface to force credential generation
+if not IS_SETUP:
+    st.info("👋 Welcome! This appears to be your first time launching the application.")
+    st.subheader("🔒 Create Your Master Admin Password")
+    st.caption("This password secures your financial analytics, payroll records, and management rosters. Choose wisely.")
+    
+    new_pwd = st.text_input("Choose New Password", type="password")
+    confirm_pwd = st.text_input("Confirm New Password", type="password")
+    
+    if st.button("Initialize & Lock System", type="primary"):
+        if not new_pwd:
+            st.error("Password cannot be blank.")
+        elif new_pwd != confirm_pwd:
+            st.error("Passwords do not match. Please verify your typing.")
+        else:
+            p_hash, p_salt = hash_password(new_pwd)
+            execute_db("INSERT INTO credentials (password_hash, password_salt) VALUES (?, ?)", (p_hash, p_salt))
+            st.success("🎉 Master admin key created, encrypted, and written to database! Reloading...")
+            st.rerun()
+            
+    st.stop() # Freeze further tab rendering until setup is done
+
 
 def check_admin_access():
     if not st.session_state["admin_authenticated"]:
         st.subheader("🔒 Admin Access Required")
-        entered_password = st.text_input("Enter Master Admin Password", type="password", key=f"global_admin_pwd_{st.session_state.get('current_tab', 'default')}")
+        entered_password = st.text_input("Enter Your Custom Admin Password", type="password", key=f"global_admin_pwd_{st.session_state.get('current_tab', 'default')}")
         if st.button("Unlock Management Tabs", key=f"global_admin_btn_{st.session_state.get('current_tab', 'default')}"):
-            if entered_password == ADMIN_PASSWORD:
+            # Query current secure key strings from storage
+            stored_creds = run_query("SELECT password_hash, password_salt FROM credentials LIMIT 1")
+            s_hash = stored_creds.iloc[0]['password_hash']
+            s_salt = stored_creds.iloc[0]['password_salt']
+            
+            if verify_password(s_hash, s_salt, entered_password):
                 st.session_state["admin_authenticated"] = True
                 st.success("Access Granted!")
                 st.rerun()
@@ -135,15 +185,9 @@ with tab1:
                     st.success("Ticket Entry posted successfully.")
                     st.rerun()
         else:
-            # UPDATED: Added "Interior Decoration" directly to the options array list here
             exp_cat = st.selectbox("Operating Expense Description", [
-                "Food/Ingredient Inventory", 
-                "Beverage Supplies", 
-                "Kitchen Equipment", 
-                "Rent & Lease", 
-                "Electricity & Gas", 
-                "Water Utility",
-                "Interior Decoration"
+                "Food/Ingredient Inventory", "Beverage Supplies", "Kitchen Equipment", 
+                "Rent & Lease", "Electricity & Gas", "Water Utility", "Interior Decoration"
             ])
             exp_amt = st.number_input("Value Amount Paid Out (£)", min_value=0.0)
             if st.button("Log Operational Expense"):
