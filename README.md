@@ -61,11 +61,21 @@ Default Admin Password: The default password to log manual hours is admin.
 Changing the Password: To secure your application, open app.py in a text editor and update the variable at the very top of the file:
 ADMIN_PASSWORD = "your-custom-secure-password"
 
+🛡️ Database Verification Testing (Inject Mock Data)
+To populate your charts instantly with a fully functional month of simulated restaurant transactions (June 2026), run the following tool string sequence in your terminal:
+
+Bash
+docker cp seed_data.py tracker_instance:/app/seed_data.py
+docker exec -it tracker_instance python seed_data.py
+Note: Refreshing your browser will immediately reflect pre-configured menus, lateness violations, and complex discount ticket actions.
+
 💡 Recommended Daily Workflow
-Staff Setup: When launching the app for the first time, navigate to the Employee Roster Setup tab. Input your staff profiles along with their standard hourly rates, regular shift hour limits (e.g., 8 hours), and overtime multipliers (e.g., 1.5).
+Roster Configurations: When first setting up, input your employees inside the Employee Roster Setup area along with their exact regular hourly wages.
 
-Daily Operations: Keep the application loaded on a floor tablet or POS computer. Staff select their name and punch Clock In or Clock Out when changing shifts.
+Build Your Menus: Use the Menu & Budgets tab to index your custom dishes, price tags, and daily target wage caps.
 
-Auditing Payroll: When paying staff out at the end of a shift or week, navigate to Daily Salary Payouts, select the target employee, and pick the work date. Review the system calculation, input your Actual Amount Paid, and review the Wage Verification Audit Trail to ensure compliance.
+Publish the Rota: Before the operational week starts, log scheduled shift assignments, dates, and times.
 
-Monthly Reporting: At the end of the calendar month, head over to Monthly Profit & Loss to monitor your net restaurant profit margins, analyze your itemized operating expenses date-by-date, and download your clean financial books as CSV sheets for accounting.
+POS Order Taking: Leave the application loaded on a countertop tablet or terminal. Staff clock in/out directly on screen, and your tills process itemized customer orders, discounts, voids, or complaint metrics seamlessly.
+
+Close the Books: Settle payroll transactions through the Payroll Auditor tab, and monitor your total tax liabilities, waste margins, and net performance directly inside Performance Analytics with immediate CSV print capabilities.

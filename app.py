@@ -6,24 +6,32 @@ import calendar
 import os
 
 # --- CONFIGURATION ---
-ADMIN_PASSWORD = "admin"  # Change this to your preferred secure password
+ADMIN_PASSWORD = "admin"
 DB_PATH = "data/restaurant_tracker.db"
 os.makedirs("data", exist_ok=True)
 
 # --- DATABASE SETUP ---
 def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS financials 
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT, type TEXT, category TEXT, amount REAL)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS employees 
-                 (name TEXT PRIMARY KEY, hourly_rate REAL, ot_multiplier REAL, standard_hours REAL)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS attendance 
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT, employee_name TEXT, date TEXT, clock_in TEXT, clock_out TEXT, reg_hours REAL, ot_hours REAL, total_hours REAL)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS salary_payouts 
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT, employee_name TEXT, hours_covered REAL, amount_paid REAL, system_calculated REAL)''')
-    conn.commit()
-    conn.close()
+    with sqlite3.connect(DB_PATH) as conn:
+        c = conn.cursor()
+        c.execute('''CREATE TABLE IF NOT EXISTS financials 
+                     (id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT, type TEXT, category TEXT, 
+                      item_name TEXT, quantity INTEGER, base_amount REAL, tax_amount REAL, net_amount REAL, 
+                      status TEXT, original_order_id INTEGER)''')
+        c.execute('''CREATE TABLE IF NOT EXISTS employees 
+                     (name TEXT PRIMARY KEY, hourly_rate REAL, ot_multiplier REAL, standard_hours REAL)''')
+        c.execute('''CREATE TABLE IF NOT EXISTS attendance 
+                     (id INTEGER PRIMARY KEY AUTOINCREMENT, employee_name TEXT, date TEXT, clock_in TEXT, clock_out TEXT, 
+                      reg_hours REAL, ot_hours REAL, total_hours REAL, is_late TEXT)''')
+        c.execute('''CREATE TABLE IF NOT EXISTS salary_payouts 
+                     (id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT, employee_name TEXT, hours_covered REAL, amount_paid REAL, system_calculated REAL)''')
+        c.execute('''CREATE TABLE IF NOT EXISTS menu 
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT, course_type TEXT, item_name TEXT, price REAL)''')
+        c.execute('''CREATE TABLE IF NOT EXISTS rota 
+                     (id INTEGER PRIMARY KEY AUTOINCREMENT, employee_name TEXT, date TEXT, start_time TEXT, allocated_hours REAL)''')
+        c.execute('''CREATE TABLE IF NOT EXISTS daily_budget 
+                     (date TEXT PRIMARY KEY, wage_budget REAL)''')
+        conn.commit()
 
 init_db()
 
@@ -38,322 +46,379 @@ def execute_db(query, params=()):
         conn.commit()
 
 # --- STREAMLIT UI SETUP ---
-st.set_page_config(page_title="Restaurant Management Hub", layout="wide")
-st.title("🍳 Restaurant Command Center & Wage Auditor")
+st.set_page_config(page_title="EPOS Restaurant Hub", layout="wide")
+st.title("🍳 Restaurant EPOS Engine, Rota Planner & Analytics")
+
+if "admin_authenticated" not in st.session_state:
+    st.session_state["admin_authenticated"] = False
+
+def check_admin_access():
+    if not st.session_state["admin_authenticated"]:
+        st.subheader("🔒 Admin Access Required")
+        entered_password = st.text_input("Enter Master Admin Password", type="password", key=f"global_admin_pwd_{st.session_state.get('current_tab', 'default')}")
+        if st.button("Unlock Management Tabs", key=f"global_admin_btn_{st.session_state.get('current_tab', 'default')}"):
+            if entered_password == ADMIN_PASSWORD:
+                st.session_state["admin_authenticated"] = True
+                st.success("Access Granted!")
+                st.rerun()
+            else:
+                st.error("Incorrect Password. Access Denied.")
+        return False
+    return True
 
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
-    "⏰ Daily Punch Clock", 
-    "💷 Daily Salary Payouts", 
-    "🧾 Log Sales & Expenses", 
-    "📈 Monthly Profit & Loss",
-    "👥 Employee Roster Setup"
+    "🧾 Log Sales & Ops (Public Floor Till)",
+    "⏰ Clock, Rota & Staff Setup", 
+    "📊 Menu & Budgets", 
+    "💷 Payroll Auditor", 
+    "📈 Performance Analytics"
 ])
 
-# --- TAB 5: EMPLOYEE ROSTER SETUP ---
-with tab5:
-    st.header("Manage Staff Profiles & Wage Rules")
-    col1, col2 = st.columns([1, 2])
-    with col1:
-        st.subheader("Add/Update Employee")
-        e_name = st.text_input("Full Name", placeholder="e.g. John Doe").strip()
-        e_rate = st.number_input("Standard Hourly Rate (£/hr)", min_value=0.0, value=11.44, step=0.5)
-        e_std = st.number_input("Standard Shift Length (Hours before OT starts)", min_value=1.0, value=8.0, step=0.5)
-        e_ot = st.number_input("Overtime Multiplier (e.g. 1.5 for Time-and-a-half)", min_value=1.0, value=1.5, step=0.1)
-        
-        if st.button("Save Staff Profile"):
-            if e_name:
-                execute_db("""INSERT INTO employees (name, hourly_rate, ot_multiplier, standard_hours) 
-                              VALUES (?, ?, ?, ?) 
-                              ON CONFLICT(name) DO UPDATE SET 
-                              hourly_rate=excluded.hourly_rate, 
-                              ot_multiplier=excluded.ot_multiplier, 
-                              standard_hours=excluded.standard_hours""", 
-                           (e_name, e_rate, e_ot, e_std))
-                st.success(f"Profile saved for {e_name}!")
-                st.rerun()
-            else:
-                st.error("Please enter a name.")
-                
-    with col2:
-        st.subheader("Current Active Profiles")
-        df_emp = run_query("SELECT name as 'Employee Name', hourly_rate as 'Base Rate (£/hr)', standard_hours as 'Regular Shift Max (Hrs)', ot_multiplier as 'OT Rate' FROM employees")
-        st.dataframe(df_emp, use_container_width=True)
+MENU_CATEGORIES = [
+    "Starters", "Chef Specials", "Burgers", "Sizzlers", "Wagyu X", "Premium Cuts", "Salads", "Sides", 
+    "Mocktails", "Cold drinks", "Gourmet drinks", "Desserts"
+]
 
-# --- TAB 1: DAILY PUNCH CLOCK ---
+# --- TAB 1: LOG SALES & OPERATIONS ---
 with tab1:
-    st.header("Shift Attendance Punch Clock")
-    col1, col2 = st.columns(2)
-    
-    emp_profiles = run_query("SELECT name FROM employees")['name'].tolist()
+    st.session_state["current_tab"] = "sales"
+    st.header("Restaurant Order Processing & EPOS Tills")
+    col1, col2 = st.columns([1, 1.2])
     
     with col1:
-        st.subheader("Staff Live Punch Clock")
-        if not emp_profiles:
-            st.warning("⚠️ Please add employees in the 'Employee Roster Setup' tab first before clocking in.")
-        else:
-            p_name = st.selectbox("Select Employee", emp_profiles, key="punch_name")
-            p_action = st.radio("Punch Type", ["Clock In", "Clock Out"])
-            
-            if st.button("Submit Time Punch"):
-                today_str = datetime.today().strftime("%Y-%m-%d")
-                now_str = datetime.now().strftime("%H:%M:%S")
+        st.subheader("Register Ticket Item")
+        op_group = st.selectbox("Transaction Group Type", ["Sale", "Expense", "Void", "Customer Complaint (Replacement)"])
+        tax_rate = st.number_input("Tax Rate / VAT Percentage (%)", min_value=0.0, value=20.0, step=1.0) / 100.0
+        
+        if op_group in ["Sale", "Void", "Customer Complaint (Replacement)"]:
+            orig_id = None
+            if op_group == "Customer Complaint (Replacement)":
+                orig_id = st.number_input("Original Order Ticket ID to Link", min_value=1, step=1, help="Enter the ID from your sales history ledger to map this loss.")
                 
-                if p_action == "Clock In":
-                    check = run_query("SELECT * FROM attendance WHERE employee_name=? AND clock_out IS NULL", (p_name,))
-                    if not check.empty:
-                        st.warning(f"⚠️ {p_name} is already clocked in!")
+            sel_course = st.selectbox("Course Catalog Group", MENU_CATEGORIES)
+            menu_df = run_query("SELECT item_name, price FROM menu WHERE course_type=?", (sel_course,))
+            
+            if menu_df.empty:
+                st.error(f"⚠️ No items found under '{sel_course}'. Please log into the '📊 Menu & Budgets' tab to add your products first.")
+            else:
+                sel_item = st.selectbox("Menu Item Select", menu_df['item_name'].tolist())
+                item_unit_price = float(menu_df[menu_df['item_name'] == sel_item]['price'].values[0])
+                qty = st.number_input("Quantity Ordered/Replaced", min_value=1, value=1, step=1)
+                
+                discount_type = st.selectbox("Apply Order Discount", ["None", "Student (10%)", "BlueLight (20%)", "Custom Custom Amount"])
+                disc_pct = 0.0
+                if discount_type == "Student (10%)": disc_pct = 0.10
+                elif discount_type == "BlueLight (20%)": disc_pct = 0.20
+                
+                custom_disc = 0.0
+                if discount_type == "Custom Custom Amount":
+                    custom_disc = st.number_input("Custom Discount Value (£)", min_value=0.0, value=0.0)
+                
+                base_calc = (item_unit_price * qty) * (1.0 - disc_pct) - custom_disc
+                base_calc = max(0.0, base_calc)
+                
+                if op_group == "Void": 
+                    base_calc = 0.0  
+                elif op_group == "Customer Complaint (Replacement)": 
+                    base_calc = -(item_unit_price * qty * 0.30) 
+                
+                calculated_tax = base_calc * tax_rate if op_group == "Sale" else 0.0
+                final_net = base_calc - calculated_tax if op_group == "Sale" else base_calc
+                
+                st.warning(f"Estimated Impact Level: Gross Impact: £{base_calc:.2f} | Tax: £{calculated_tax:.2f} | Net: £{final_net:.2f}")
+                
+                if st.button("Post Ticket Entry"):
+                    t_date = st.date_input("Execution Date", datetime.today(), key="exec_date_btn")
+                    execute_db("""INSERT INTO financials (date, type, category, item_name, quantity, base_amount, tax_amount, net_amount, status, original_order_id) 
+                                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                               (t_date.strftime("%Y-%m-%d"), op_group, sel_course, sel_item, qty, base_calc, calculated_tax, final_net, discount_type, orig_id))
+                    st.success("Ticket Entry posted successfully.")
+                    st.rerun()
+        else:
+            # UPDATED: Added "Interior Decoration" directly to the options array list here
+            exp_cat = st.selectbox("Operating Expense Description", [
+                "Food/Ingredient Inventory", 
+                "Beverage Supplies", 
+                "Kitchen Equipment", 
+                "Rent & Lease", 
+                "Electricity & Gas", 
+                "Water Utility",
+                "Interior Decoration"
+            ])
+            exp_amt = st.number_input("Value Amount Paid Out (£)", min_value=0.0)
+            if st.button("Log Operational Expense"):
+                t_date = st.date_input("Execution Date", datetime.today(), key="exp_date_btn")
+                execute_db("INSERT INTO financials (date, type, category, base_amount, tax_amount, net_amount, status, original_order_id) VALUES (?, 'Expense', ?, ?, 0, ?, 'Standard', NULL)",
+                           (t_date.strftime("%Y-%m-%d"), exp_cat, -exp_amt, -exp_amt))
+                st.success("Expense logged.")
+                st.rerun()
+
+    with col2:
+        st.subheader("Live Operational Entry Stream (Today)")
+        st.caption("Tip: Use the leftmost 'id' column number as your Original Order ID reference.")
+        st.dataframe(run_query("SELECT id, date as Date, type as Type, category as Category, item_name as Item, base_amount as 'Cost/Rev (£)' FROM financials ORDER BY id DESC LIMIT 15"), use_container_width=True)
+
+# --- TAB 2: CLOCK, ROTA & STAFF SETUP ---
+with tab2:
+    st.session_state["current_tab"] = "clock"
+    if check_admin_access():
+        st.header("Weekly Rota & Attendance Desk")
+        st.subheader("👥 Employee Master Roster Profiles")
+        col_emp1, col_emp2 = st.columns([1, 2])
+        with col_emp1:
+            st.write("**Add / Update Staff Member**")
+            e_name = st.text_input("Full Name (Unique)", placeholder="e.g. John Doe").strip()
+            e_rate = st.number_input("Standard Hourly Rate (£/hr)", min_value=0.0, value=11.44, step=0.5)
+            e_std = st.number_input("Standard Shift Length Max (Hours)", min_value=1.0, value=8.0, step=0.5)
+            e_ot = st.number_input("Overtime Multiplier", min_value=1.0, value=1.5, step=0.1)
+            
+            if st.button("Save Staff Profile"):
+                if e_name:
+                    execute_db("""INSERT INTO employees (name, hourly_rate, ot_multiplier, standard_hours) 
+                                  VALUES (?, ?, ?, ?) 
+                                  ON CONFLICT(name) DO UPDATE SET 
+                                  hourly_rate=excluded.hourly_rate, 
+                                  ot_multiplier=excluded.ot_multiplier, 
+                                  standard_hours=excluded.standard_hours""", 
+                               (e_name, e_rate, e_ot, e_std))
+                    st.success(f"Profile saved for {e_name}!")
+                    st.rerun()
+                else:
+                    st.error("Please enter a name.")
+        with col_emp2:
+            st.write("**Active Roster Records**")
+            df_emp = run_query("SELECT name as 'Employee Name', hourly_rate as 'Base Rate (£/hr)', standard_hours as 'Regular Shift Max (Hrs)', ot_multiplier as 'OT Rate' FROM employees")
+            st.dataframe(df_emp, use_container_width=True)
+            
+        st.write("---")
+        col1, col2 = st.columns([1.2, 2])
+        emp_profiles = run_query("SELECT name FROM employees")['name'].tolist()
+        
+        with col1:
+            st.subheader("📅 Schedule a Staff Shift (Rota)")
+            if not emp_profiles:
+                st.info("ℹ️ Create an employee profile above first to enable scheduling selections.")
+            else:
+                r_name = st.selectbox("Staff Member", emp_profiles, key="rota_name")
+                r_date = st.date_input("Shift Date", datetime.today(), key="rota_date")
+                r_start = st.time_input("Scheduled Start Time", datetime.strptime("17:00", "%H:%M").time())
+                r_hours = st.number_input("Allocated Hours", min_value=0.5, max_value=16.0, value=8.0, step=0.5)
+                if st.button("Publish to Rota"):
+                    execute_db("INSERT INTO rota (employee_name, date, start_time, allocated_hours) VALUES (?, ?, ?, ?)",
+                               (r_name, r_date.strftime("%Y-%m-%d"), r_start.strftime("%H:%M"), r_hours))
+                    st.success(f"Shift published for {r_name} on {r_date}")
+            
+            st.write("---")
+            st.subheader("⏱️ Live Punch Clock")
+            if not emp_profiles:
+                st.info("ℹ️ Attendance tools unlock once employee roster lines exist.")
+            else:
+                p_name = st.selectbox("Employee Select", emp_profiles, key="punch_name")
+                p_action = st.radio("Punch", ["Clock In", "Clock Out"])
+                if st.button("Submit Time Punch"):
+                    t_str = datetime.today().strftime("%Y-%m-%d")
+                    n_str = datetime.now().strftime("%H:%M:%S")
+                    if p_action == "Clock In":
+                        sched = run_query("SELECT start_time FROM rota WHERE employee_name=? AND date=?", (p_name, t_str))
+                        is_late = "No"
+                        if not sched.empty:
+                            sched_time = datetime.strptime(f"{t_str} {sched.iloc[0]['start_time']}:00", "%Y-%m-%d %H:%M:%S")
+                            if datetime.now() > sched_time + timedelta(minutes=15): is_late = "Yes"
+                        execute_db("INSERT INTO attendance (employee_name, date, clock_in, is_late) VALUES (?, ?, ?, ?)", (p_name, t_str, n_str, is_late))
+                        st.success(f"Clocked IN. Lateness flagged: {is_late}")
                     else:
-                        execute_db("INSERT INTO attendance (employee_name, date, clock_in) VALUES (?, ?, ?)", (p_name, today_str, now_str))
-                        st.success(f"✅ {p_name} clocked IN at {now_str}")
-                        st.rerun()
-                        
-                elif p_action == "Clock Out":
-                    active = run_query("SELECT id, clock_in FROM attendance WHERE employee_name=? AND clock_out IS NULL ORDER BY id DESC LIMIT 1", (p_name,))
-                    if active.empty:
-                        st.error(f"❌ No active clock-in found for {p_name}.")
-                    else:
-                        row_id = int(active.iloc[0]['id'])
-                        in_time_str = active.iloc[0]['clock_in']
-                        
-                        fmt = "%H:%M:%S"
-                        t_in = datetime.strptime(in_time_str, fmt)
-                        t_out = datetime.strptime(now_str, fmt)
-                        if t_out < t_in: t_out += timedelta(days=1)
-                        
-                        total_hours = (t_out - t_in).total_seconds() / 3600.0
-                        
-                        rules = run_query("SELECT standard_hours FROM employees WHERE name=?", (p_name,))
-                        std_limit = float(rules.iloc[0]['standard_hours']) if not rules.empty else 8.0
-                        
-                        if total_hours > std_limit:
-                            reg_h = std_limit
-                            ot_h = total_hours - std_limit
+                        active = run_query("SELECT id, clock_in FROM attendance WHERE employee_name=? AND clock_out IS NULL ORDER BY id DESC LIMIT 1", (p_name,))
+                        if active.empty: st.error("No active shift setup found for this user.")
                         else:
-                            reg_h = total_hours
-                            ot_h = 0.0
-                            
-                        execute_db("""UPDATE attendance SET clock_out=?, reg_hours=?, ot_hours=?, total_hours=? 
-                                      WHERE id=?""", (now_str, round(reg_h, 2), round(ot_h, 2), round(total_hours, 2), row_id))
-                        st.success(f"🏁 {p_name} clocked OUT at {now_str}. Regular: {reg_h:.2f} hrs, Overtime: {ot_h:.2f} hrs.")
-                        st.rerun()
+                            t_in = datetime.strptime(active.iloc[0]['clock_in'], "%H:%M:%S")
+                            t_out = datetime.strptime(n_str, "%H:%M:%S")
+                            tot_h = max(0.1, (t_out - t_in).total_seconds() / 3600.0)
+                            execute_db("UPDATE attendance SET clock_out=?, reg_hours=?, ot_hours=0, total_hours=? WHERE id=?", (n_str, round(tot_h, 2), round(tot_h, 2), int(active.iloc[0]['id'])))
+                            st.success(f"Clocked OUT. Total hours: {tot_h:.2f}")
+                            st.rerun()
+
+        with col2:
+            st.subheader("📋 Current Weekly Rota Blueprint")
+            st.dataframe(run_query("SELECT date as Date, employee_name as Staff, start_time as 'Start Time', allocated_hours as 'Allocated Hrs' FROM rota ORDER BY date DESC"), use_container_width=True)
+            st.subheader("🟢 Active Floor Shifts & Lateness Log")
+            st.dataframe(run_query("SELECT date as Date, employee_name as Staff, clock_in as 'In', clock_out as 'Out', total_hours as 'Hours', is_late as 'Late?' FROM attendance ORDER BY id DESC LIMIT 10"), use_container_width=True)
+
+# --- TAB 3: MENU & BUDGETS (ADMIN) ---
+with tab3:
+    st.session_state["current_tab"] = "menu"
+    if check_admin_access():
+        st.header("Global Configuration: Menus & Daily Wage Budgets")
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.subheader("🍴 Live Menu Management System")
+            m_course = st.selectbox("Category Classification", MENU_CATEGORIES, key="menu_cat_mgr")
+            m_name = st.text_input("New Item Title Name").strip()
+            m_price = st.number_input("Base Selling Value Price (£)", min_value=0.0, value=5.0)
+            
+            if st.button("Save New Menu Item"):
+                if m_name:
+                    execute_db("INSERT INTO menu (course_type, item_name, price) VALUES (?, ?, ?)", (m_course, m_name, m_price))
+                    st.success(f"Added {m_name} to menu.")
+                    st.rerun()
+                    
+            st.write("---")
+            st.caption("Active Menu Listings (Select to Delete)")
+            all_menu = run_query("SELECT id, course_type as Category, item_name as Name, price as 'Price (£)' FROM menu ORDER BY course_type ASC")
+            if not all_menu.empty:
+                st.dataframe(all_menu, use_container_width=True)
+                del_id = st.number_input("Enter Menu ID number to erase", min_value=1, step=1)
+                if st.button("Delete Selected Menu Item", type="secondary"):
+                    execute_db("DELETE FROM menu WHERE id=?", (del_id,))
+                    st.success("Item removed from system index.")
+                    st.rerun()
+
+        with col2:
+            st.subheader("💰 Daily Wage Cap Controls & Labor Budgets")
+            b_date = st.date_input("Target Allocation Date", datetime.today())
+            b_budget = st.number_input("Target Daily Wage Cap Allowance (£)", min_value=0.0, value=200.0)
+            if st.button("Save Wage Budget Limit"):
+                execute_db("INSERT INTO daily_budget (date, wage_budget) VALUES (?, ?) ON CONFLICT(date) DO UPDATE SET wage_budget=excluded.wage_budget",
+                           (b_date.strftime("%Y-%m-%d"), b_budget))
+                st.success(f"Budget for {b_date} updated.")
+                
+            st.write("---")
+            st.subheader("Daily Budget Financial Performance Tracker")
+            b_logs = run_query("SELECT date as Date, wage_budget as 'Budget Limit (£)' FROM daily_budget ORDER BY date DESC LIMIT 10")
+            st.dataframe(b_logs, use_container_width=True)
+
+# --- TAB 4: PAYROLL AUDITOR (ADMIN) ---
+with tab4:
+    st.session_state["current_tab"] = "payroll"
+    if check_admin_access():
+        st.header("Automated Salary Calculator & Wage Disbursement")
+        col1, col2 = st.columns([1, 1.5])
+        emp_profiles = run_query("SELECT name FROM employees")['name'].tolist()
+        
+        with col1:
+            st.subheader("Process Shift Payroll")
+            if not emp_profiles:
+                st.info("⚠️ Please add staff profiles in the 'Clock & Rota' setup area first.")
+            else:
+                pay_name = st.selectbox("Staff Target Member", emp_profiles, key="payout_sb")
+                pay_date = st.date_input("Work Date Target to Settle", datetime.today())
+                p_date_str = pay_date.strftime("%Y-%m-%d")
+                
+                prof = run_query("SELECT hourly_rate, ot_multiplier FROM employees WHERE name=?", (pay_name,))
+                shifts = run_query("SELECT SUM(reg_hours) as reg, is_late FROM attendance WHERE employee_name=? AND date=?", (pay_name, p_date_str))
+                
+                base_rate = float(prof.iloc[0]['hourly_rate']) if not prof.empty else 0.0
+                tracked_reg = float(shifts.iloc[0]['reg']) if not shifts.empty and shifts.iloc[0]['reg'] is not None else 0.0
+                is_late_flag = shifts.iloc[0]['is_late'] if not shifts.empty else "No"
+                
+                system_earnings = tracked_reg * base_rate
+                
+                st.info(f"""
+                **Payroll Analysis for {pay_name} on {p_date_str}:**
+                * Total Hours Logged: {tracked_reg:.2f} Hours
+                * Marked Late Today?: **{is_late_flag}**
+                * **Suggested System Earnings: £{system_earnings:.2f}**
+                """)
+                
+                pay_amount = st.number_input("Actual Amount Disbursed Out (£)", min_value=0.0, value=round(system_earnings, 2))
+                if st.button("Log & Settle Payout"):
+                    execute_db("INSERT INTO salary_payouts (date, employee_name, hours_covered, amount_paid, system_calculated) VALUES (?, ?, ?, ?, ?)",
+                               (p_date_str, pay_name, tracked_reg, pay_amount, system_earnings))
+                    execute_db("INSERT INTO financials (date, type, category, base_amount, tax_amount, net_amount, status, original_order_id) VALUES (?, 'Salary Paid', 'Labor Cost', ?, 0, ?, 'Standard', NULL)",
+                               (p_date_str, -pay_amount, -pay_amount))
+                    st.success("Payroll transaction cleared.")
+                    st.rerun()
+
+        with col2:
+            st.subheader("Payroll Audits & Historic Records")
+            st.dataframe(run_query("SELECT date as Date, employee_name as Staff, hours_covered as Hours, system_calculated as 'Expected (£)', amount_paid as 'Paid (£)' FROM salary_payouts ORDER BY id DESC"), use_container_width=True)
+
+# --- TAB 5: PERFORMANCE ANALYTICS (ADMIN) ---
+with tab5:
+    st.session_state["current_tab"] = "analytics"
+    if check_admin_access():
+        st.header("Executive Restaurant Profit Analytics & Product Audits")
+        
+        years = [2026, 2027, 2025]
+        months = list(calendar.month_name)[1:]
+        
+        col_sel1, col_sel2 = st.columns(2)
+        with col_sel1: sel_m = st.selectbox("Primary Analysis Month", months, index=datetime.today().month - 1)
+        with col_sel2: sel_y = st.selectbox("Primary Analysis Year", years, index=0)
+        
+        m_num = months.index(sel_m) + 1
+        m_prefix = f"{sel_y}-{m_num:02d}"
+        
+        f_df = run_query("SELECT * FROM financials WHERE date LIKE ?", (f"{m_prefix}%",))
+        
+        st.subheader(f"📊 Business Dashboard: Overview for {sel_m} {sel_y}")
+        if f_df.empty:
+            st.info("No sales or expense metrics found for this period.")
+        else:
+            gross_sales = f_df[f_df['type'] == 'Sale']['base_amount'].sum()
+            collected_tax = f_df[f_df['type'] == 'Sale']['tax_amount'].sum()
+            
+            ops_expenses = abs(f_df[f_df['type'] == 'Expense']['base_amount'].sum())
+            complaints_cost = abs(f_df[f_df['type'] == 'Customer Complaint (Replacement)']['base_amount'].sum())
+            labor_paid = abs(f_df[f_df['type'] == 'Salary Paid']['base_amount'].sum())
+            
+            total_profit = gross_sales - collected_tax - ops_expenses - complaints_cost - labor_paid
+            
+            budget_df = run_query("SELECT SUM(wage_budget) as allowed FROM daily_budget WHERE date LIKE ?", (f"{m_prefix}%",))
+            allowed_wage_budget = float(budget_df.iloc[0]['allowed']) if not budget_df.empty and budget_df.iloc[0]['allowed'] is not None else 0.0
+            remaining_wage_budget = max(0.0, allowed_wage_budget - labor_paid)
+            
+            final_adjusted_profit = total_profit + remaining_wage_budget
+
+            # Metrics
+            c_m1, c_m2, c_m3, c_m4 = st.columns(4)
+            c_m1.metric("Gross Revenue (Total Sale)", f"£{gross_sales:,.2f}")
+            c_m2.metric("Collected VAT Tax", f"£{collected_tax:,.2f}")
+            c_m3.metric("Labor & Ops Costs", f"£{(ops_expenses + labor_paid + complaints_cost):,.2f}")
+            c_m4.metric("Adjusted Net Profit", f"£{final_adjusted_profit:,.2f}", delta=f"£{remaining_wage_budget:.2f} Unspent Labor Savings Included")
+            
+            # Complaints Audit Section
+            st.write("---")
+            st.subheader("🚨 Month-End Customer Complaint Cost Audit")
+            complaints_df = f_df[f_df['type'] == 'Customer Complaint (Replacement)']
+            if not complaints_df.empty:
+                st.dataframe(complaints_df[['date', 'original_order_id', 'item_name', 'quantity', 'base_amount']].rename(
+                    columns={'date':'Date', 'original_order_id':'Original Ticket ID', 'item_name':'Item Name', 'quantity':'Qty', 'base_amount':'Wasted Cost Hit (£)'}
+                ), use_container_width=True)
+            else:
+                st.info("Excellent! No food replacement complaints recorded this month.")
+
+            st.write("---")
+            st.subheader("📦 Product Sales Volume Count Report")
+            v_df = f_df[f_df['type'] == 'Sale'].groupby(['category', 'item_name'])['quantity'].sum().reset_index()
+            v_df.columns = ['Product Group', 'Item Name', 'Units Sold Count']
+            st.dataframe(v_df.sort_values(by='Units Sold Count', ascending=False), use_container_width=True)
 
         st.write("---")
+        st.subheader("📈 Multi-Month Performance Comparison Engines")
         
-        # --- ADMIN OVERRIDE SECTION ---
-        st.subheader("🔑 Admin Manual Hours Entry")
-        admin_pass = st.text_input("Enter Admin Password", type="password")
-        
-        if admin_pass == ADMIN_PASSWORD:
-            st.success("Access Granted: Admin Mode Active")
-            
-            # Show persisting success/error status message if it exists in session memory
-            if "admin_message" in st.session_state:
-                st.info(st.session_state["admin_message"])
-                # Clear it so it won't permanently stick around if they change tabs later
-                del st.session_state["admin_message"]
+        comp_m = st.multiselect("Select Target Months to Compare Side-by-Side", months, default=["February", "March", "April", "May", "June"])
+        if comp_m:
+            comp_data = []
+            for cm in comp_m:
+                cm_num = months.index(cm) + 1
+                cm_pref = f"{sel_y}-{cm_num:02d}"
+                cm_df = run_query("SELECT item_name, quantity, type FROM financials WHERE date LIKE ?", (f"{cm_pref}%",))
                 
-            if not emp_profiles:
-                st.info("No employee configurations available.")
-            else:
-                m_name = st.selectbox("Add Hours For", emp_profiles, key="admin_name")
-                m_date = st.date_input("Date of Shift", datetime.today(), key="admin_date")
-                m_reg = st.number_input("Regular Hours Worked", min_value=0.0, max_value=24.0, value=8.0, step=0.5)
-                m_ot = st.number_input("Overtime Hours Worked", min_value=0.0, max_value=24.0, value=0.0, step=0.5)
-                m_total = m_reg + m_ot
-                
-                if st.button("Apply Manual Shift Logs", type="primary"):
-                    date_str = m_date.strftime("%Y-%m-%d")
-                    
-                    try:
-                        # Database operation validation check
-                        execute_db("""INSERT INTO attendance (employee_name, date, clock_in, clock_out, reg_hours, ot_hours, total_hours) 
-                                      VALUES (?, ?, 'MANUAL', 'MANUAL', ?, ?, ?)""", 
-                                   (m_name, date_str, round(m_reg, 2), round(m_ot, 2), round(m_total, 2)))
+                if not cm_df.empty:
+                    sales_cm = cm_df[cm_df['type'] == 'Sale']
+                    if not sales_cm.empty:
+                        top_performer = sales_cm.groupby('item_name')['quantity'].sum().idxmax()
+                        top_units = sales_cm.groupby('item_name')['quantity'].sum().max()
+                        worst_performer = sales_cm.groupby('item_name')['quantity'].sum().idxmin()
+                        worst_units = sales_cm.groupby('item_name')['quantity'].sum().min()
                         
-                        # Store structural message into state session
-                        st.session_state["admin_message"] = f"💾 SUCCESS: Saved manual entry for {m_name} on {date_str}. Total logged: {m_total:.2f} Hours ({m_reg:.2f} Regular, {m_ot:.2f} Overtime)."
-                    except Exception as e:
-                        st.session_state["admin_message"] = f"❌ FAILED to write logs to database. Error details: {str(e)}"
-                    
-                    st.rerun()
-        elif admin_pass != "":
-            st.error("Incorrect Password. Access Denied.")
-
-    with col2:
-        st.subheader("Currently Working Shifts")
-        active_shifts = run_query("SELECT employee_name as 'Employee', date as 'Date Started', clock_in as 'Clocked In At' FROM attendance WHERE clock_out IS NULL")
-        st.dataframe(active_shifts, use_container_width=True)
-
-# --- TAB 2: DAILY SALARY PAYOUTS ---
-with tab2:
-    st.header("Daily Wage Automated Calculator & Disbursement")
-    col1, col2 = st.columns([1, 1.5])
-    with col1:
-        st.subheader("Calculate & Record Payroll")
-        if not emp_profiles:
-            st.info("Add employees to record salary payouts.")
-        else:
-            pay_name = st.selectbox("Pay To Employee", emp_profiles, key="pay_name_sb")
-            pay_date = st.date_input("Target Work Date to Pay", datetime.today())
-            pay_date_str = pay_date.strftime("%Y-%m-%d")
-            
-            prof = run_query("SELECT hourly_rate, ot_multiplier FROM employees WHERE name=?", (pay_name,))
-            shifts = run_query("SELECT SUM(reg_hours) as reg, SUM(ot_hours) as ot, SUM(total_hours) as tot FROM attendance WHERE employee_name=? AND date=? AND clock_out IS NOT NULL", (pay_name, pay_date_str))
-            
-            base_rate = float(prof.iloc[0]['hourly_rate']) if not prof.empty else 0.0
-            ot_mult = float(prof.iloc[0]['ot_multiplier']) if not prof.empty else 1.0
-            
-            tracked_reg = float(shifts.iloc[0]['reg']) if not shifts.empty and shifts.iloc[0]['reg'] is not None else 0.0
-            tracked_ot = float(shifts.iloc[0]['ot']) if not shifts.empty and shifts.iloc[0]['ot'] is not None else 0.0
-            tracked_total = tracked_reg + tracked_ot
-            
-            system_earnings = (tracked_reg * base_rate) + (tracked_ot * (base_rate * ot_mult))
-            
-            st.info(f"""
-            **Time Clock Data for {pay_name} on {pay_date_str}:**
-            * Regular Hours: {tracked_reg:.2f} hrs (@ £{base_rate:.2f}/hr)
-            * Overtime Hours: {tracked_ot:.2f} hrs (@ £{base_rate * ot_mult:.2f}/hr)
-            * **Suggested System Earnings: £{system_earnings:.2f}**
-            """)
-            
-            pay_amount = st.number_input("Actual Amount Paid Out (£)", min_value=0.0, value=round(system_earnings, 2), step=5.0)
-            
-            if st.button("Log & Settle Payout"):
-                execute_db("INSERT INTO salary_payouts (date, employee_name, hours_covered, amount_paid, system_calculated) VALUES (?, ?, ?, ?, ?)",
-                           (pay_date_str, pay_name, tracked_total, pay_amount, system_earnings))
-                execute_db("INSERT INTO financials (date, type, category, amount) VALUES (?, 'Salary Paid', ?, ?)",
-                           (pay_date_str, f"Wages to {pay_name}", pay_amount))
-                st.success(f"Logged payment of £{pay_amount:.2f} to {pay_name} for date {pay_date_str}")
-                st.rerun()
-
-    with col2:
-        st.subheader("Wage Verification Audit Trail")
-        df_payouts = run_query("SELECT date as 'Date', employee_name as 'Employee', hours_covered as 'Hours', system_calculated as 'Expected (£)', amount_paid as 'Paid Out (£)' FROM salary_payouts ORDER BY id DESC")
-        
-        if df_payouts.empty:
-            st.info("No recorded payouts yet.")
-        else:
-            audit_records = []
-            for idx, row in df_payouts.iterrows():
-                diff = row['Paid Out (£)'] - row['Expected (£)']
-                if abs(diff) < 0.05:
-                    status = "✅ Match"
-                elif diff > 0:
-                    status = f"⚠️ Overpaid (£{abs(diff):.2f})"
-                else:
-                    status = f"🚨 Underpaid (£{abs(diff):.2f})"
-                
-                audit_records.append({
-                    "Date": row['Date'],
-                    "Employee": row['Employee'],
-                    "Hours": row['Hours'],
-                    "Expected": f"£{row['Expected (£)']:,.2f}",
-                    "Paid Out": f"£{row['Paid Out (£)']:,.2f}",
-                    "Status": status
-                })
-            st.dataframe(pd.DataFrame(audit_records), use_container_width=True)
-
-# --- TAB 3: LOG SALES & EXPENSES ---
-with tab3:
-    st.header("Restaurant Ledger Entry")
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.subheader("Log Item")
-        f_date = st.date_input("Date", datetime.today(), key="ledger_date")
-        f_type = st.selectbox("Category Group", ["Sale", "Expense"])
-        f_cat = st.selectbox("Description Item", [
-            "Food/Ingredient Inventory", "Beverage Supplies", "Kitchen Equipment", 
-            "Rent & Lease", "Electricity & Gas", "Water Utility", "Marketing",
-            "Front-of-House Till Cash Sale", "Online Delivery Platform Income", "Catering Service Drop"
-        ] if f_type == "Expense" else ["Front-of-House Till Cash Sale", "Online Delivery Platform Income", "Catering Service Drop"])
-        
-        f_amount = st.number_input("Total Transaction Value (£)", min_value=0.0, step=10.0)
-        
-        if st.button("Save Transaction Record"):
-            if f_amount > 0:
-                execute_db("INSERT INTO financials (date, type, category, amount) VALUES (?, ?, ?, ?)",
-                           (f_date.strftime("%Y-%m-%d"), f_type, f_cat, f_amount))
-                st.success(f"Logged £{f_amount} under {f_type}")
-                st.rerun()
-
-    with col2:
-        st.subheader("Last 10 General Ledger Rows")
-        df_ledg = run_query("SELECT date as 'Date', type as 'Type', category as 'Item Description', amount as 'Amount (£)' FROM financials ORDER BY id DESC LIMIT 10")
-        st.dataframe(df_ledg, use_container_width=True)
-
-# --- TAB 4: MONTHLY PROFIT & LOSS ---
-with tab4:
-    st.header("Monthly Profitability Analytics & Export Center")
-    
-    years = [2026, 2027, 2025]
-    months = list(calendar.month_name)[1:]
-    
-    c1, c2 = st.columns(2)
-    with c1:
-        sel_month_name = st.selectbox("Select Target Month", months, index=datetime.today().month - 1)
-    with c2:
-        sel_year = st.selectbox("Select Target Year", years, index=0)
-        
-    sel_month_num = months.index(sel_month_name) + 1
-    month_prefix = f"{sel_year}-{sel_month_num:02d}"
-    
-    df_m_fin = run_query("SELECT date as 'Date', type as 'Ledger Type', category as 'Line Item Description', amount as 'Amount (£)' FROM financials WHERE date LIKE ? ORDER BY date ASC", (f"{month_prefix}%",))
-    
-    st.subheader(f"Financial Status Breakdown for {sel_month_name} {sel_year}")
-    
-    if df_m_fin.empty:
-        st.info("No financial ledger entries found for this specific month.")
-    else:
-        m_sales = df_m_fin[df_m_fin['Ledger Type'] == 'Sale']['Amount (£)'].sum()
-        m_expenses = df_m_fin[df_m_fin['Ledger Type'] == 'Expense']['Amount (£)'].sum()
-        m_salaries = df_m_fin[df_m_fin['Ledger Type'] == 'Salary Paid']['Amount (£)'].sum()
-        m_profit = m_sales - (m_expenses + m_salaries)
-        
-        mc1, mc2, mc3, mc4 = st.columns(4)
-        mc1.metric("Gross Restaurant Sales", f"£{m_sales:,.2f}")
-        mc2.metric("Operational Expenses", f"£{m_expenses:,.2f}")
-        mc3.metric("Total Payroll Settled", f"£{m_salaries:,.2f}")
-        
-        if m_profit >= 0:
-            mc4.metric("Net Restaurant Profit", f"£{m_profit:,.2f}", delta=f"£{m_profit:,.2f} Net Surplus")
-        else:
-            mc4.metric("Net Restaurant Profit", f"£{m_profit:,.2f}", delta=f"£{m_profit:,.2f} Deficit", delta_color="inverse")
-            
-        st.write("#### Date-Wise Itemized Category Breakdown Ledger")
-        st.dataframe(df_m_fin, use_container_width=True)
-        
-        csv_fin = df_m_fin.to_csv(index=False).encode('utf-8')
-        st.download_button(
-            label="📥 Download Monthly Ledger as CSV",
-            data=csv_fin,
-            file_name=f"Financial_Ledger_{month_prefix}.csv",
-            mime="text/csv"
-        )
-
-    st.write("---")
-    st.subheader(f"Total Working Hours & Overtime Log: {sel_month_name} {sel_year}")
-    
-    df_m_att = run_query("""
-        SELECT employee_name as 'Staff Member', 
-               COUNT(id) as 'Total Shifts Formed', 
-               SUM(reg_hours) as 'Regular Hours Worked', 
-               SUM(ot_hours) as 'Overtime Hours Logged', 
-               SUM(total_hours) as 'Total Accumulated Hours' 
-        FROM attendance 
-        WHERE date LIKE ? AND clock_out IS NOT NULL 
-        GROUP BY employee_name
-    """, (f"{month_prefix}%",))
-    
-    if not df_m_att.empty:
-        st.dataframe(df_m_att, use_container_width=True)
-        
-        csv_att = df_m_att.to_csv(index=False).encode('utf-8')
-        st.download_button(
-            label="📥 Download Monthly Hours Report as CSV",
-            data=csv_att,
-            file_name=f"Employee_Hours_{month_prefix}.csv",
-            mime="text/csv"
-        )
-    else:
-        st.info("No clocked employee shift records found finalized for this month.")
+                        comp_data.append({
+                            "Month Evaluated": cm,
+                            "Top Selling Menu Item": top_performer,
+                            "Top Units Volume": int(top_units),
+                            "Lowest Selling Menu Item": worst_performer,
+                            "Lowest Units Volume": int(worst_units)
+                        })
+            if comp_data:
+                st.dataframe(pd.DataFrame(comp_data), use_container_width=True)
